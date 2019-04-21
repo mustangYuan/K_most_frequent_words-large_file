@@ -1,39 +1,38 @@
 package main;
 
-import java.io.BufferedReader;
-import java.io.FileReader;
+import java.io.*;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class KWords {
-    private int k = 100;
+    private int k = 100;    //number of words needed
     private String filepath;
     private ConcurrentHashMap<String, AtomicInteger> count;
-    List<CountDownLatch> latch;
-
+    private Stack<Word> s;  //store the most frequent k words
 
     public KWords(String str) {
         filepath = str;
         count = new ConcurrentHashMap<>();
-        latch = new ArrayList<>();
+        s = new Stack<>();
     }
 
     private void findFreq() {
-        BufferedReader reader = null;
-        ExecutorService threadPool = Executors.newFixedThreadPool(7);
+        //find frequency of each word in a file
+
+        //use thread pool to manage threads
+        ExecutorService threadPool = Executors.newFixedThreadPool(11);
 
         try {
-            reader = new BufferedReader(new FileReader(filepath));
+            BufferedInputStream bis = new BufferedInputStream(new FileInputStream(new File(filepath)));
+            BufferedReader reader = new BufferedReader(new InputStreamReader(bis), 10 * 1024 * 1024);
+
             boolean hasMore = true;
-            int i = 0;
             List<String> txt;
             String line = null;
             int numOfLines;
 
+            //read 100 lines and allocate a thread to do word count
             while (hasMore) {
                 numOfLines = 100;
                 txt = new ArrayList<>();
@@ -48,57 +47,89 @@ public class KWords {
                     numOfLines--;
                 }
 
-                latch.add(new CountDownLatch(1));
-                WordCounter counter = new WordCounter(txt, i);
+                WordCounter counter = new WordCounter(txt);
                 threadPool.execute(counter);
-                i++;
             }
             reader.close();
 
-            for (CountDownLatch l : latch) {
-                l.await();
-            }
+            //wait for all threads to finish
+            threadPool.shutdown();
+            threadPool.awaitTermination(Long.MAX_VALUE, TimeUnit.MINUTES);
 
         } catch (Exception e) {
             e.printStackTrace();
-        } finally {
-            threadPool.shutdown();
         }
     }
 
     private void kMostFrequent() {
-        System.out.println(count.size() + " total different words.");
-
-        PriorityQueue<Word> pq = new PriorityQueue<>();
+        //traverse each entry in the map, and use a min heap to maintain the k most frequent words
+        PriorityQueue<Word> minHeap = new PriorityQueue<>();
         for (Map.Entry<String, AtomicInteger> entry : count.entrySet()) {
             String word = entry.getKey();
             int freq = entry.getValue().get();
-            pq.add(new Word(word, freq));
-            if (pq.size() > k) pq.poll();
+
+            //keep at most k elements in the heap
+            if (minHeap.size() < k) minHeap.add(new Word(word, freq));
+            else {
+                if (freq > minHeap.peek().freq) {
+                    minHeap.poll();
+                    minHeap.add(new Word(word, freq));
+                }
+            }
         }
 
-        Stack<Word> s = new Stack<>();
-        while (pq.size() != 0) s.push(pq.poll());
+        //store the result in a stack
+        while (minHeap.size() != 0) s.push(minHeap.poll());
+    }
 
+    public void calculate() {
+        findFreq();
+        kMostFrequent();
+    }
+
+    private String writeToFile() {
+        //write the result to a file for future merge
+        File f = new File(filepath);
+        String pathPrefix = f.getParent() + "/";
+        String filename = pathPrefix + "res_" + filepath.substring(filepath.lastIndexOf('_') + 1);
+
+        try {
+            File file = new File(filename);
+            if (!file.exists()) file.createNewFile();
+            FileWriter fWriter = new FileWriter(file, true);
+            BufferedWriter writer = new BufferedWriter(fWriter);
+            StringBuilder sb = new StringBuilder();
+
+            while (!s.empty()) {
+                Word w = s.pop();
+                sb.append(w.str).append(' ').append(w.freq);
+                writer.write(sb.toString());
+                writer.newLine();
+                sb.delete(0, sb.length());
+            }
+
+            writer.close();
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+        return filename;
+    }
+
+    private void showResult() {
+        //display the result
         System.out.println("The first 100 most frequent words:");
 
         int i = 1;
-        while (s.size() != 0) {
+        while (!s.empty()) {
             Word w = s.pop();
             System.out.printf("%3d: %-20s %10d\n", i, w.str, w.freq);
             i++;
         }
     }
 
-    public void showResult() {
-        long startTime = System.currentTimeMillis();
-        findFreq();
-        long endTime = System.currentTimeMillis();
-        System.out.println("Execution time: " + (endTime - startTime) / 1000.0 + "s");
-        kMostFrequent();
-    }
-
     private class Word implements Comparable<Word> {
+        //used in min heap
         public String str;
         public int freq;
 
@@ -113,32 +144,30 @@ public class KWords {
     }
 
     private class WordCounter extends Thread {
-        private int index;
         private List<String> text;
         private Map<String, Integer> cnt;
 
-        private WordCounter(List<String> text, int i) {
+        private WordCounter(List<String> text) {
             this.text = text;
-            index = i;
             cnt = new HashMap<>();
         }
 
         public void run() {
             counter();
 
+            //update record to main thread
             for (Map.Entry<String, Integer> entry : cnt.entrySet()) {
                 String key = entry.getKey();
                 int value = entry.getValue();
 
                 if (count.putIfAbsent(key, new AtomicInteger(value)) != null)
                     count.get(key).getAndAdd(value);
-
             }
 
-            latch.get(index).countDown();
         }
 
         private void counter() {
+            //count words frequency, and store in a local hash map
             for (String line : text) {
                 int n = line.length();
                 StringBuilder sb = new StringBuilder();
@@ -153,7 +182,7 @@ public class KWords {
                             cnt.put(str, cnt.get(str) + 1);
                         else
                             cnt.put(str, 1);
-                        sb = new StringBuilder();
+                        sb.delete(0, sb.length());
                     }
                 }
                 if (sb.length() != 0) {
@@ -168,18 +197,60 @@ public class KWords {
 
     }
 
-
     public static void main(String[] args) {
-        //KWords k_words = new KWords("C:\\Users\\28939\\Desktop\\2019Spring\\COEN242 Big Data\\data_1GB.txt");
-        KWords k_words = new KWords("C:\\Users\\28939\\Downloads\\DataSet\\data_8GB.txt");
+        //for 32GB file, do pre-process to partition the file first
+
+        /*
+        long startTime = System.currentTimeMillis();
+
+        //use your file path
+        Preprocess pre = new Preprocess("C:\\Users\\28939\\Downloads\\DataSet\\data_32GB.txt");
+        List<String> files = pre.partition();
+
+        long middleTime = System.currentTimeMillis();
+        System.out.println("Pre-processing time: " + (middleTime - startTime) / 1000.0 + "s");
+
+        List<String> resFiles = new ArrayList<>();
+        for (String file : files) {
+            KWords k_words = new KWords(file);
+            k_words.calculate();
+            String resFile = k_words.writeToFile();
+            resFiles.add(resFile);
+        }
+
+        Merge merge = new Merge(resFiles);
+        merge.showResult();
+
+        long endTime = System.currentTimeMillis();
+        System.out.println("Processing time: " + (endTime - middleTime) / 1000.0 + "s");
+
+        //delete all files created during this program
+        for (String filename : files) {
+            File file = new File(filename);
+            if (file.exists() && file.isFile())
+                file.delete();
+        }
+
+        for (String resFile : resFiles) {
+            File file = new File(resFile);
+            if (file.exists() && file.isFile())
+                file.delete();
+        }
+
+        */
+
+
+
+        //for 1GB file and 8GB file, don't need to do pre-process
+
+        long startTime = System.currentTimeMillis();
+
+        //use your file path
+        KWords k_words = new KWords("C:\\Users\\28939\\Downloads\\DataSet\\data_1GB.txt");
+        k_words.calculate();
         k_words.showResult();
 
-//        if (args.length == 0) return;
-//
-//        for (int i = 0; i < args.length; ++i) {
-//            KWords k_words = new KWords(args[i]);
-//            k_words.showResult();
-//        }
-
+        long endTime = System.currentTimeMillis();
+        System.out.println("Processing time: " + (endTime - startTime) / 1000.0 + "s");
     }
 }
